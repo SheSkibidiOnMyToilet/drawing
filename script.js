@@ -4,6 +4,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const canvasElements = document.querySelectorAll('.drawing-canvas');
     let activeLayer = 0;
     
+    // Undo history
+    const maxHistorySteps = 50;
+    const history = []; // Will store snapshots of all three layers
+    
     // Drawing state
     let isDrawing = false;
     let lastX = 0;
@@ -15,6 +19,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let startWidth = 5;
     let endWidth = 5;
     let eraserSize = 20;
+    
+    // Layer order tracking (index corresponds to z-index, value is the layer number)
+    let layerOrder = [0, 1, 2]; // Bottom to top
     
     // Set initial canvas size
     const canvasWidth = 800;
@@ -29,6 +36,20 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
     });
+    
+    // Take initial snapshot of empty canvases
+    saveToHistory();
+    
+    // Update canvas z-index based on layer order
+    function updateCanvasOrder() {
+        layerOrder.forEach((layerNum, index) => {
+            const canvas = document.getElementById(`layer-${layerNum}`);
+            canvas.style.zIndex = index; // Higher index = higher in the stack
+        });
+    }
+    
+    // Initialize canvas order
+    updateCanvasOrder();
     
     // Get active canvas and context
     const getActiveCanvas = () => document.getElementById(`layer-${activeLayer}`);
@@ -63,9 +84,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Layer selection
     const layerElements = document.querySelectorAll('.layer');
     layerElements.forEach(layer => {
-        layer.addEventListener('click', () => {
-            // Don't switch layers if just toggling visibility or opacity
-            if (event.target.type === 'checkbox' || event.target.type === 'range') return;
+        layer.addEventListener('click', (event) => {
+            // Don't switch layers if just toggling visibility or opacity or clicking move buttons
+            if (event.target.type === 'checkbox' || 
+                event.target.type === 'range' || 
+                event.target.tagName === 'BUTTON' || 
+                event.target.tagName === 'I') return;
             
             // Remove active class from all layers
             layerElements.forEach(l => l.classList.remove('active'));
@@ -108,6 +132,34 @@ document.addEventListener('DOMContentLoaded', () => {
             
             // Set canvas opacity
             canvas.style.opacity = value / 100;
+        });
+    });
+    
+    // Layer movement controls
+    document.querySelectorAll('.layer-up, .layer-down').forEach(button => {
+        button.addEventListener('click', (e) => {
+            const layerNum = parseInt(button.dataset.layer);
+            const isUp = button.classList.contains('layer-up');
+            
+            // Find the current position of this layer in the order
+            const currentIndex = layerOrder.indexOf(layerNum);
+            
+            // Calculate the new index
+            let newIndex = isUp ? currentIndex + 1 : currentIndex - 1;
+            
+            // Check bounds
+            if (newIndex < 0 || newIndex >= layerOrder.length) return;
+            
+            // Save current state before moving layers
+            saveToHistory();
+            
+            // Swap this layer with the one at the new index
+            const otherLayer = layerOrder[newIndex];
+            layerOrder[newIndex] = layerNum;
+            layerOrder[currentIndex] = otherLayer;
+            
+            // Update canvas z-index
+            updateCanvasOrder();
         });
     });
     
@@ -199,6 +251,9 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         
+        // Save state before resize
+        saveToHistory();
+        
         // For each canvas, create a temporary canvas to hold the current content
         canvasElements.forEach(canvas => {
             const tempCanvas = document.createElement('canvas');
@@ -224,6 +279,9 @@ document.addEventListener('DOMContentLoaded', () => {
     
     clearButton.addEventListener('click', () => {
         if (confirm('Are you sure you want to clear the current layer?')) {
+            // Save state before clearing
+            saveToHistory();
+            
             const canvas = getActiveCanvas();
             const ctx = getActiveContext();
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -241,6 +299,11 @@ document.addEventListener('DOMContentLoaded', () => {
         lastY = (e.clientY - rect.top) * scaleY;
         
         isDrawing = true;
+        
+        // Take a snapshot before starting to draw
+        if (currentTool !== 'eyedropper') {
+            saveToHistory();
+        }
         
         // For marker tool, we start at the calculated position
         if (currentTool === 'marker') {
@@ -355,9 +418,12 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Eyedropper function
     function pickColor(e) {
-        // Check all layers from top to bottom
-        for (let i = 2; i >= 0; i--) {
-            const canvas = document.getElementById(`layer-${i}`);
+        // Get layers in visual order (top to bottom)
+        const orderedLayers = [...layerOrder].reverse();
+        
+        // Check each layer from top to bottom
+        for (const layerNum of orderedLayers) {
+            const canvas = document.getElementById(`layer-${layerNum}`);
             
             // Skip if layer is hidden
             if (canvas.style.display === 'none') continue;
@@ -493,6 +559,65 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
+    // Save current canvas state to history
+    function saveToHistory() {
+        // Create a new history entry with snapshots of all three layers
+        const historyEntry = [];
+        
+        canvasElements.forEach(canvas => {
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = canvas.width;
+            tempCanvas.height = canvas.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(canvas, 0, 0);
+            historyEntry.push(tempCanvas);
+        });
+        
+        // Add to history
+        history.push(historyEntry);
+        
+        // Limit history size
+        if (history.length > maxHistorySteps) {
+            history.shift();
+        }
+        
+        // Enable undo button if it exists
+        if (document.getElementById('undo-button')) {
+            document.getElementById('undo-button').disabled = false;
+        }
+    }
+    
+    // Undo last action
+    function undo() {
+        if (history.length <= 1) return; // Keep at least the initial state
+        
+        // Remove the current state
+        history.pop();
+        
+        // Get the previous state
+        const previousState = history[history.length - 1];
+        
+        // Restore canvases from the previous state
+        canvasElements.forEach((canvas, index) => {
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(previousState[index], 0, 0);
+        });
+        
+        // Disable undo button if we've reached the initial state
+        if (history.length <= 1 && document.getElementById('undo-button')) {
+            document.getElementById('undo-button').disabled = true;
+        }
+    }
+    
+    // Add undo keyboard shortcut (Ctrl+Z)
+    document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+            e.preventDefault();
+            undo();
+        }
+    });
+    
     // Event listeners
     canvasContainer.addEventListener('mousedown', startDrawing);
     canvasContainer.addEventListener('mousemove', draw);
@@ -501,4 +626,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Prevent context menu on right-click
     canvasContainer.addEventListener('contextmenu', e => e.preventDefault());
+    
+    // Expose undo function to window for easy access from HTML
+    window.undoDrawingAction = undo;
 }); 
